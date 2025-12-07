@@ -1,11 +1,16 @@
+import logging
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+
+from aiokafka.errors import KafkaError
 from bson import ObjectId  # <--- IMPORTAÇÃO OBRIGATÓRIA
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import get_current_client
 from ..db import get_db
 from ..kafka_producer import send_message_event
 from ..models import MessageCreate, MessageDB
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/messages", tags=["messages"])
 
@@ -57,6 +62,13 @@ async def send_message(body: MessageCreate, client_id: str = Depends(get_current
     "payload": body.payload.model_dump(),
     "metadata": body.metadata or {},
   }
-  await send_message_event(event)
+
+  try:
+    await send_message_event(event)
+  except KafkaError as exc:
+    # Rollback do registro para evitar mensagens órfãs quando o Kafka estiver fora do ar
+    await db.messages.delete_one({"_id": res.inserted_id})
+    logger.exception("Kafka indisponível ao publicar a mensagem")
+    raise HTTPException(status_code=503, detail="Message broker unavailable") from exc
 
   return MessageDB(**doc)
